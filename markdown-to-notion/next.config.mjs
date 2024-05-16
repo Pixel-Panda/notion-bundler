@@ -1,8 +1,10 @@
 // next.config.mjs
-export default {
+import path from 'path';
+const nextConfig = {
   reactStrictMode: true,
-  webpack(config, options) {
-    config.resolve.modules.push(__dirname);
+  webpack(config) {
+    config.resolve.modules.push(path.resolve('./src'));
     return config;
   },
 };
+export default nextConfig;
