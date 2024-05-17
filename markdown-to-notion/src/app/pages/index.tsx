@@ -1,51 +1,70 @@
-import { useState } from 'react';
-import axios from 'axios';
+import { NextApiRequest, NextApiResponse } from 'next';
+import { promises as fs } from 'fs';
+import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
+import unzipper from 'unzipper';
 
-export default function Home() {
-  const [files, setFiles] = useState<FileList | null>(null);
-  const [pageId, setPageId] = useState(process.env.NEXT_PUBLIC_NOTION_PAGE_ID || '');
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFiles(e.target.files);
-  };
+const parseForm = async (req: NextApiRequest) => {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+};
 
-  const handlePageIdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setPageId(e.target.value);
-  };
+const processDirectory = async (dirPath: string): Promise<string> => {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  let textBundleContent = '';
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!files) return;
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
 
-    const formData = new FormData();
-    Array.from(files).forEach(file => {
-      formData.append('files', file);
-    });
-    formData.append('pageId', pageId);
+    if (entry.isDirectory()) {
+      textBundleContent += await processDirectory(fullPath);
+    } else if (entry.isFile() && path.extname(entry.name) === '.md') {
+      const fileContent = await fs.readFile(fullPath, 'utf-8');
+      textBundleContent += `\n\n# ${entry.name}\n\n${fileContent}`;
+    }
+  }
 
-    await axios.post('/api/upload', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
-  };
+  return textBundleContent;
+};
 
-  return (
-    <div className="container mx-auto p-4">
-      <h1 className="text-2xl font-bold">Upload Markdown Files to Notion</h1>
-      <form onSubmit={handleSubmit} className="mt-4">
-        <input type="file" multiple accept=".md" onChange={handleFileChange} className="mb-2" />
-        <input
-          type="text"
-          placeholder="Notion Page ID"
-          value={pageId}
-          onChange={handlePageIdChange}
-          className="mb-2 p-2 border"
-        />
-        <button type="submit" className="p-2 bg-blue-500 text-white">
-          Upload
-        </button>
-      </form>
-    </div>
-  );
-}
+const handler = async (req: NextApiRequest, res: NextApiResponse) => {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ message: 'Method not allowed' });
+  }
+
+  try {
+    const data = await parseForm(req);
+    const uploadDir = path.join(process.cwd(), 'uploads', uuidv4());
+
+    await fs.mkdir(uploadDir, { recursive: true });
+    const zipPath = path.join(uploadDir, 'upload.zip');
+
+    await fs.writeFile(zipPath, data);
+
+    // Unzip the file
+    await fs.createReadStream(zipPath).pipe(unzipper.Extract({ path: uploadDir })).promise();
+
+    // Process the unzipped directory
+    const textBundleContent = await processDirectory(uploadDir);
+
+    const textBundleDir = path.join(uploadDir, 'textbundle');
+    await fs.mkdir(textBundleDir);
+    await fs.writeFile(path.join(textBundleDir, 'text.md'), textBundleContent);
+
+    res.status(200).json({ message: 'Directory processed and converted to textbundle', textBundleDir });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Error processing the directory' });
+  }
+};
+
+export default handler;
